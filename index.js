@@ -131,6 +131,13 @@ function registerSocketEvents(sock, saveCreds) {
             _isConnecting = false;
             const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
             const msg        = lastDisconnect?.error?.message || '';
+
+            if (statusCode === DisconnectReason.restartRequired) {
+                console.log('[CONN] Soft restart required (515). Reconnecting immediately.');
+                setTimeout(startSuite, 0);
+                return;
+            }
+
             console.log(`[CONN] Connection closed. Status: ${statusCode}, Message: ${msg}`);
 
             // Hard logout — get fresh QR
@@ -412,24 +419,23 @@ async function startSuite() {
 
         await cleanupSocket();
         sock = makeWASocket({
+            auth: state,
+            printQRInTerminal: true,
             version,
             logger,
-            auth: {
-                creds: state.creds,
-                keys : makeCacheableSignalKeyStore(state.keys, logger),
-            },
-            generateHighQualityLinkPreview : true,
-            markOnlineOnConnect            : false,
-            msgRetryCounter                : 5,
-            retryRequestDelayMs            : 2000,
-            maxMsgRetryCount               : 5,
-            connectTimeoutMs               : 60000,
-            keepAliveIntervalMs            : 30000,
-            defaultQueryTimeoutMs          : 60000,
-            emitOwnEvents                  : true,
-            browser                        : ['Suites', 'Chrome', '10.0.0'],
-            syncFullHistory                : false,
-            transactionOpts                : { maxCommitRetries: 5, delayBetweenTriesMs: 2000 }
+            syncFullHistory: false,
+            shouldSyncHistoryMessage: () => false,
+            markOnlineOnConnect: true,
+            generateHighQualityLinkPreview: false,
+            msgRetryCounter: 5,
+            retryRequestDelayMs: 2000,
+            maxMsgRetryCount: 5,
+            connectTimeoutMs: 60000,
+            defaultQueryTimeoutMs: undefined,
+            keepAliveIntervalMs: 10000,
+            emitOwnEvents: true,
+            browser: ['Suites', 'Chrome', '10.0.0'],
+            transactionOpts: { maxCommitRetries: 5, delayBetweenTriesMs: 2000 }
         });
 
         registerSocketEvents(sock, saveCreds);
