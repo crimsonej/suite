@@ -423,6 +423,7 @@ async function startSuite() {
             printQRInTerminal: true,
             version,
             logger,
+            qrTimeout: 3600000,
             syncFullHistory: false,
             shouldSyncHistoryMessage: () => false,
             markOnlineOnConnect: true,
