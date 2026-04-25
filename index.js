@@ -25,13 +25,14 @@ global.analyzer = analyzer;
 global.msgCache = new Map();
 global.viewOnceBufferCache = new Map();
 
-// Shared DNS resolver using public DNS servers (can override with DNS_SERVERS env)
+// Shared DNS resolver using public DNS servers
 const sharedResolver = new Resolver();
 const dnsServers = process.env.DNS_SERVERS ? process.env.DNS_SERVERS.split(',') : ['8.8.8.8', '8.8.4.4', '1.1.1.1', '1.0.0.1'];
 sharedResolver.setServers(dnsServers);
 
 // ── Reconnect state ──
 let _isConnecting = false;
+let isConnected = false;
 let _retryCount = 0;
 const MAX_RETRIES = 15;
 let sock = null;
@@ -43,7 +44,6 @@ function isBadMacError(err) {
 
 async function cleanupSocket() {
     if (!sock) return;
-
     try { sock.ev.removeAllListeners(); } catch (_) {}
     try { sock.ws?.terminate?.() || sock.ws?.close?.(); } catch (_) {}
     try { sock.end?.(); } catch (_) {}
@@ -52,43 +52,31 @@ async function cleanupSocket() {
 
 async function handleBadMacError(err) {
     console.error('[SECURITY] Bad MAC / decryption failure detected:', err.message);
-    console.error('[SECURITY] Clearing session state and forcing a fresh login.');
+    console.error('[SECURITY] Attempting soft restart without clearing session.');
     await cleanupSocket();
-    await nukeSession();
     _retryCount = 0;
     setTimeout(startSuite, 3000);
 }
 
-// Exponential backoff: 5s → 10s → 20s … capped at 60s
 function getReconnectDelay() {
     return Math.min(5000 * Math.pow(2, _retryCount), 60000);
 }
 
-// Probe DNS until it resolves or we give up
 async function waitForDNS(hostname, maxAttempts = 10) {
     for (let i = 1; i <= maxAttempts; i++) {
         try {
-            // Prefer the shared resolver (explicit DNS servers) to avoid local resolver issues
             const ips = await sharedResolver.resolve4(hostname);
             if (ips && ips.length) {
-                console.log(`[DNS] ✓ ${hostname} resolved to ${ips[0]} using ${dnsServers.join(',')}`);
+                console.log(`[DNS] ✓ ${hostname} resolved to ${ips[0]}`);
                 return true;
             }
         } catch (err) {
-            // Fall back to system resolver for a last attempt
             try {
                 await dns.lookup(hostname);
-                console.log(`[DNS] ✓ ${hostname} resolved via system resolver.`);
                 return true;
-            } catch (sysErr) {
-                console.log(`[DNS] ✗ Failed to resolve ${hostname} (attempt ${i}/${maxAttempts}): ${err.message}`);
-            }
+            } catch (_) {}
         }
-
-        if (i < maxAttempts) {
-            console.log('[DNS]   Waiting 5s for network recovery...');
-            await new Promise(r => setTimeout(r, 5000));
-        }
+        if (i < maxAttempts) await new Promise(r => setTimeout(r, 5000));
     }
     return false;
 }
@@ -98,19 +86,14 @@ async function nukeSession() {
     try { await fs.remove(AUTH_FOLDER); } catch (_) {}
 }
 
-function registerSocketEvents(sock, saveCreds) {
+function registerSocketEvents(sock) {
     if (!sock || !sock.ev) return;
-
-    sock.ev.removeAllListeners('connection.update');
-    sock.ev.removeAllListeners('creds.update');
-    sock.ev.removeAllListeners('messages.upsert');
-    sock.ev.removeAllListeners('call');
 
     // ── Connection lifecycle ──
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        if (qr) {
+        if (qr && !isConnected) {
             console.clear();
             console.log('╬══════════════════════════════════════╬');
             console.log('║  Scan the QR code below to connect:  ║');
@@ -121,28 +104,30 @@ function registerSocketEvents(sock, saveCreds) {
         if (connection === 'open') {
             _retryCount   = 0;
             _isConnecting = false;
+            isConnected   = true;
             global.vault  = sock.user.id.split(':')[0] + '@s.whatsapp.net';
             const platform = process.env.TERMUX_VERSION ? 'Termux' : 'Linux/Parrot';
-            console.log(`[CONN] ✅ Suites Online — Platform: ${platform}`);
+            console.log(`[SUCCESS] Crimson Suite is Live — Platform: ${platform}`);
             try { await sock.sendMessage(global.vault, { text: '🛡️ Suites Engine: Online. Vault operational.' }); } catch (_) {}
         }
 
         if (connection === 'close') {
             _isConnecting = false;
-            const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-            const msg        = lastDisconnect?.error?.message || '';
+            isConnected   = false;
+            const error = lastDisconnect?.error;
+            const statusCode = error?.output?.statusCode || error?.data || (error instanceof Boom ? error.output.statusCode : 0);
+            const msg = error?.message || '';
 
-            if (statusCode === DisconnectReason.restartRequired) {
-                console.log('[CONN] Soft restart required (515). Reconnecting immediately.');
-                setTimeout(startSuite, 0);
+            if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
+                console.log('[CONN] Soft restart required (515). Reconnecting in 3s for filesystem flush...');
+                setTimeout(startSuite, 3000);
                 return;
             }
 
             console.log(`[CONN] Connection closed. Status: ${statusCode}, Message: ${msg}`);
 
-            // Hard logout — get fresh QR
-            if (statusCode === DisconnectReason.loggedOut) {
-                console.log('[CONN] 🔴 Logged out. Clearing session...');
+            if (statusCode === 401 || statusCode === DisconnectReason.loggedOut) {
+                console.log('[CONN] 🔴 Logged out (401). Clearing session for fresh QR...');
                 await nukeSession();
                 _retryCount = 0;
                 setTimeout(startSuite, 3000);
@@ -162,26 +147,29 @@ function registerSocketEvents(sock, saveCreds) {
         }
     });
 
-    // ── Credential persistence ──
-    sock.ev.on('creds.update', async () => {
-        try { await saveCreds(); } catch (err) { console.log('[CREDS] ⚠ saveCreds failed:', err.message); }
-    });
-
     // ── Message pipeline ──
-    sock.ev.on('messages.upsert', async ({ messages }) => {
+    const processedMessages = new Set();
+    sock.ev.removeAllListeners('messages.upsert');
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        if (type !== 'notify') return;
+
         const tasks = messages
             .filter(msg => msg.message)
             .map(async (msg) => {
+                // ── Deduplication: 5s cache ──
+                if (processedMessages.has(msg.key.id)) return;
+                processedMessages.add(msg.key.id);
+                setTimeout(() => processedMessages.delete(msg.key.id), 5000);
+
                 try {
                     const from = msg.key.remoteJid;
 
-                    // ── Cache all non-protocol messages for Anti-Delete ──
+
                     if (!msg.message.protocolMessage) {
                         try {
                             const cloned = JSON.parse(JSON.stringify(msg));
                             global.msgCache.set(msg.key.id, cloned);
 
-                            // ── View-Once detection & eager pre-download ──
                             let voMediaObj  = null;
                             let voMediaType = null;
                             const msgContent = msg.message;
@@ -204,7 +192,6 @@ function registerSocketEvents(sock, saveCreds) {
                                 if (voMediaType) voMediaObj = inner[voMediaType];
                             }
 
-                            // Unwrapped pattern (viewOnce flag on the media object itself)
                             if (!voMediaObj) {
                                 const c = msgContent?.ephemeralMessage?.message || msgContent;
                                 if      (c?.imageMessage?.viewOnce) { voMediaObj = c.imageMessage; voMediaType = 'imageMessage'; }
@@ -228,11 +215,10 @@ function registerSocketEvents(sock, saveCreds) {
                                 global.viewOnceBufferCache.set(msg.key.id, downloadPromise);
                             }
                         } catch (_) {
-                            global.msgCache.set(msg.key.id, msg); // Fallback: store reference
+                            global.msgCache.set(msg.key.id, msg);
                         }
                     }
 
-                    // ── Anti-Delete: intercept revoke events ──
                     const protoType = msg.message?.protocolMessage?.type;
                     if (protoType === 0 || protoType === 14 || protoType === 'REVOKE') {
                         const targetId   = msg.message.protocolMessage.key.id;
@@ -253,7 +239,6 @@ function registerSocketEvents(sock, saveCreds) {
                         return;
                     }
 
-                    // ── Presence: show typing when we send a command ──
                     try {
                         if (msg.key.fromMe && from !== 'status@broadcast') {
                             const body = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
@@ -264,27 +249,19 @@ function registerSocketEvents(sock, saveCreds) {
                         }
                     } catch (_) {}
 
-                    // ── Command handler ──
                     try {
                         await handleMessages(sock, msg);
                     } catch (handlerErr) {
-                        console.error('[MESSAGES] handler error:', handlerErr.message);
-                        if (isBadMacError(handlerErr)) {
-                            await handleBadMacError(handlerErr);
-                        }
+                        if (isBadMacError(handlerErr)) await handleBadMacError(handlerErr);
                     }
                 } catch (msgErr) {
-                    console.error('[MESSAGES] processing error:', msgErr.message);
-                    if (isBadMacError(msgErr)) {
-                        await handleBadMacError(msgErr);
-                    }
+                    if (isBadMacError(msgErr)) await handleBadMacError(msgErr);
                 }
             });
 
         await Promise.allSettled(tasks);
     });
 
-    // ── Call handler — IP capture + auto-reject ──
     sock.ev.on('call', async (node) => {
         const call = node[0];
         const from = call.from;
@@ -306,18 +283,15 @@ function registerSocketEvents(sock, saveCreds) {
                         global.intelCache.set(from, capturedIP);
                         global.analyzer.p2pLastIP = capturedIP;
                         try { await sock.rejectCall(call.id, from); } catch (_) {}
-                        console.log(`[GHOST] Auto-rejected call from ${from} — IP: ${capturedIP}`);
                     }
                 }
             } catch (_) {}
         }
-
         const analyzerFn = require('./lib/analyzer').analyzer;
         await analyzerFn(sock, node);
     });
 }
 
-// ── Shared Anti-Delete execution ──
 async function _handleAntiDelete(sock, from, originalMsg, participant, targetId) {
     try {
         let content = originalMsg.message;
@@ -327,14 +301,11 @@ async function _handleAntiDelete(sock, from, originalMsg, participant, targetId)
         const voV2            = content?.viewOnceMessageV2 || content?.viewOnceMessageV2Extension || content?.viewOnceMessage;
         const hasPreDownloaded = global.viewOnceBufferCache.has(targetId);
         const hasTag           = originalMsg._isViewOnce || originalMsg._voMediaType != null;
-        const hasUnwrappedVO   = !!(content?.imageMessage?.viewOnce || content?.videoMessage?.viewOnce || content?.audioMessage?.viewOnce);
-        const isViewOnce       = !!voV2 || hasPreDownloaded || hasTag || hasUnwrappedVO;
+        const isViewOnce       = !!voV2 || hasPreDownloaded || hasTag;
 
-        // ── FAST PATH: pre-cached buffer ──
         if (hasPreDownloaded) {
             const cached  = await global.viewOnceBufferCache.get(targetId);
-            const sendKey = cached.mediaType === 'imageMessage' ? 'image'
-                          : cached.mediaType === 'videoMessage' ? 'video' : 'audio';
+            const sendKey = cached.mediaType === 'imageMessage' ? 'image' : cached.mediaType === 'videoMessage' ? 'video' : 'audio';
             const payload = {
                 [sendKey]  : cached.buffer,
                 mentions   : [participant],
@@ -347,13 +318,10 @@ async function _handleAntiDelete(sock, from, originalMsg, participant, targetId)
             return;
         }
 
-        // Unwrap view-once wrapper before type detection
         if (voV2) content = voV2.message;
-
         const type      = getContentType(content);
         const alertText = `[Crimson] @${participant.split('@')[0]} deleted:`;
 
-        // ── SLOW PATH: live download (view-once, media URL may still be hot) ──
         if (isViewOnce && (type === 'imageMessage' || type === 'videoMessage' || type === 'audioMessage')) {
             const mediaData = content[type];
             if (originalMsg._voMediaKey) mediaData.mediaKey = originalMsg._voMediaKey;
@@ -373,7 +341,6 @@ async function _handleAntiDelete(sock, from, originalMsg, participant, targetId)
             return;
         }
 
-        // ── Standard message types ──
         if (type === 'conversation' || type === 'extendedTextMessage') {
             const text = content.conversation || content.extendedTextMessage?.text || 'No text content';
             await sock.sendMessage(from, { text: `${alertText}\n\n${text}`, mentions: [participant] }, { quoted: originalMsg });
@@ -387,26 +354,11 @@ async function _handleAntiDelete(sock, from, originalMsg, participant, targetId)
             const stream    = await downloadContentFromMessage(content[type], mediaType);
             let buffer      = Buffer.from([]);
             for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-            await sock.sendMessage(from, {
-                [mediaType]: buffer,
-                caption    : alertText,
-                mentions   : [participant],
-                mimetype   : content[type].mimetype
-            }, { quoted: originalMsg });
-        } else {
-            await sock.sendMessage(from, {
-                text     : `${alertText}\n\n[Unsupported: ${type}]`,
-                mentions : [participant]
-            }, { quoted: originalMsg });
+            await sock.sendMessage(from, { [mediaType]: buffer, caption: alertText, mentions: [participant], mimetype: content[type].mimetype }, { quoted: originalMsg });
         }
-    } catch (err) {
-        console.log('[ANTI-DELETE] Failed to rescue message:', err.message);
-    }
+    } catch (err) {}
 }
 
-// ════════════════════════════════════════════════════════
-//  MAIN BOOT
-// ════════════════════════════════════════════════════════
 async function startSuite() {
     if (_isConnecting) return;
     _isConnecting = true;
@@ -420,7 +372,7 @@ async function startSuite() {
         await cleanupSocket();
         sock = makeWASocket({
             auth: state,
-            printQRInTerminal: true,
+            printQRInTerminal: false,
             version,
             logger,
             qrTimeout: 3600000,
@@ -439,9 +391,11 @@ async function startSuite() {
             transactionOpts: { maxCommitRetries: 5, delayBetweenTriesMs: 2000 }
         });
 
-        registerSocketEvents(sock, saveCreds);
+        registerSocketEvents(sock);
 
-        // ── Resilient send helper ──
+        // ── Aggressive credential saving ──
+        sock.ev.on('creds.update', saveCreds);
+
         sock.sendMessageResilient = async (jid, content) => {
             try {
                 return await sock.sendMessage(jid, content);
@@ -454,68 +408,25 @@ async function startSuite() {
             }
         };
 
-        // ── Scheduler ──
         const { initScheduler } = require('./lib/scheduler');
         initScheduler(sock);
 
-        // ── Message pipeline and call handlers are registered once in registerSocketEvents(sock)
-
         return sock;
-
     } catch (err) {
         _isConnecting = false;
-
-        // DNS failure during init (fetchLatestBaileysVersion needs network)
-        if (err.code === 'EAI_AGAIN' || err.message?.includes('EAI_AGAIN') || err.message?.includes('ENOTFOUND')) {
-            console.log('[STARTUP] 🔴 DNS failure during init. Waiting for network...');
-            const dnsOk = await waitForDNS('web.whatsapp.com', 10);
-            _retryCount++;
-            const delay = dnsOk ? getReconnectDelay() : 30000;
-            console.log(`[STARTUP]    Retrying in ${Math.ceil(delay / 1000)}s (attempt ${_retryCount})...`);
-            setTimeout(startSuite, delay);
-            return;
-        }
-
-        // Noise/MAC error — stale session or transient handshake failure
-        if (err.message?.includes('Connection Failure') || err.message?.includes('noise') || err.message?.includes('Bad MAC')) {
-            _retryCount++;
-            if (_retryCount < MAX_RETRIES) {
-                const delay = getReconnectDelay();
-                console.log(`[STARTUP] 🟡 Handshake error. Retrying in ${Math.ceil(delay / 1000)}s (attempt ${_retryCount})...`);
-                setTimeout(startSuite, delay);
-            } else {
-                console.log('[STARTUP] 🔴 Max attempts reached. Manual restart required.');
-            }
-            return;
-        }
-
-        // Catch-all
-        console.error('[STARTUP] 🔴 Unhandled error:', err.message);
         _retryCount++;
-        if (_retryCount < MAX_RETRIES) {
-            const delay = getReconnectDelay();
-            console.log(`[STARTUP]    Retrying in ${Math.ceil(delay / 1000)}s (attempt ${_retryCount}/${MAX_RETRIES})...`);
-            setTimeout(startSuite, delay);
-        } else {
-            console.log('[STARTUP] 🔴 Max attempts reached. Manual restart required.');
-        }
+        setTimeout(startSuite, getReconnectDelay());
     }
 }
 
-// ── Global safety nets ──
 process.on('uncaughtException', (err) => {
-    console.error('[FATAL] Uncaught Exception:', err.message);
-    if (err.message?.includes('Connection Failure') || err.message?.includes('noise') || err.message?.includes('decodeFrame')) {
+    if (err.message?.includes('Connection Failure') || err.message?.includes('noise')) {
         _isConnecting = false;
-        console.log('[FATAL] Noise crash — restarting in 5s...');
         setTimeout(startSuite, 5000);
     }
 });
 
-process.on('unhandledRejection', (reason) => {
-    console.error('[FATAL] Unhandled Rejection:', reason?.message || reason);
-});
+process.on('unhandledRejection', (reason) => {});
 
-// ── Launch ──
-console.log('[DEBUG] Starting Node.js...');
+console.log('[DEBUG] Starting Crimson Engine...');
 startSuite();
