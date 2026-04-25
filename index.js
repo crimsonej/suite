@@ -431,7 +431,7 @@ async function startSuite() {
             retryRequestDelayMs: 2000,
             maxMsgRetryCount: 5,
             connectTimeoutMs: 60000,
-            defaultQueryTimeoutMs: undefined,
+            defaultQueryTimeoutMs: 0,
             keepAliveIntervalMs: 10000,
             emitOwnEvents: true,
             browser: ['Suites', 'Chrome', '10.0.0'],
