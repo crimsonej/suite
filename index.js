@@ -3,9 +3,9 @@ const {
     useMultiFileAuthState,
     DisconnectReason,
     fetchLatestBaileysVersion,
-    makeCacheableSignalKeyStore,
     getContentType,
-    downloadContentFromMessage
+    downloadContentFromMessage,
+    jidNormalizedUser
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const fs = require('fs-extra');
@@ -13,13 +13,10 @@ const path = require('path');
 const dns = require('dns').promises;
 const { Resolver } = require('dns').promises;
 const qrcode = require('qrcode-terminal');
-const { handleMessages } = require('./lib/handler');
+const { handleMessages, _handleAntiDelete } = require('./lib/handler');
 const analyzer = require('./lib/analyzer');
-<<<<<<< HEAD
-=======
 const axios = require('axios');
 const { getSettings } = require('./lib/settings');
->>>>>>> a076549 (latest)
 
 const AUTH_FOLDER = path.resolve(__dirname, 'session_auth');
 
@@ -29,20 +26,27 @@ global.intelCache = new Map();
 global.analyzer = analyzer;
 global.msgCache = new Map();
 global.viewOnceBufferCache = new Map();
-<<<<<<< HEAD
-=======
+
 // Candidate maps for P2P handshake tracking
-global.candidateMapByCallId = new Map(); // callId -> Set of IPs
-global.candidateMapByFrom = new Map();   // from JID -> Set of IPs
-global.initiatedTargets = new Set();     // targetJid currently probed by ./track
->>>>>>> a076549 (latest)
+global.candidateMapByCallId = new Map();
+global.candidateMapByFrom = new Map();
+global.initiatedTargets = new Set();
+
+// Cache size limiter for memory protection (max 1000 messages)
+const MAX_MSG_CACHE_SIZE = 1000;
+function safeCacheMessage(id, msg) {
+    if (global.msgCache.size >= MAX_MSG_CACHE_SIZE) {
+        const firstKey = global.msgCache.keys().next().value;
+        global.msgCache.delete(firstKey);
+    }
+    global.msgCache.set(id, msg);
+}
 
 // Shared DNS resolver using public DNS servers
 const sharedResolver = new Resolver();
 const dnsServers = process.env.DNS_SERVERS ? process.env.DNS_SERVERS.split(',') : ['8.8.8.8', '8.8.4.4', '1.1.1.1', '1.0.0.1'];
 sharedResolver.setServers(dnsServers);
 
-// ── Reconnect state ──
 let _isConnecting = false;
 let isConnected = false;
 let _retryCount = 0;
@@ -168,7 +172,6 @@ function registerSocketEvents(sock) {
         const tasks = messages
             .filter(msg => msg.message)
             .map(async (msg) => {
-                // ── Deduplication: 5s cache ──
                 if (processedMessages.has(msg.key.id)) return;
                 processedMessages.add(msg.key.id);
                 setTimeout(() => processedMessages.delete(msg.key.id), 5000);
@@ -176,11 +179,10 @@ function registerSocketEvents(sock) {
                 try {
                     const from = msg.key.remoteJid;
 
-
                     if (!msg.message.protocolMessage) {
                         try {
                             const cloned = JSON.parse(JSON.stringify(msg));
-                            global.msgCache.set(msg.key.id, cloned);
+                            safeCacheMessage(msg.key.id, cloned);
 
                             let voMediaObj  = null;
                             let voMediaType = null;
@@ -215,7 +217,7 @@ function registerSocketEvents(sock) {
                                 cloned._isViewOnce  = true;
                                 cloned._voMediaType = voMediaType;
                                 cloned._voMediaKey  = voMediaObj.mediaKey;
-                                global.msgCache.set(msg.key.id, cloned);
+                                safeCacheMessage(msg.key.id, cloned);
 
                                 const dlType = voMediaType === 'imageMessage' ? 'image' : voMediaType === 'videoMessage' ? 'video' : 'audio';
                                 const downloadPromise = (async () => {
@@ -227,17 +229,18 @@ function registerSocketEvents(sock) {
                                 global.viewOnceBufferCache.set(msg.key.id, downloadPromise);
                             }
                         } catch (_) {
-                            global.msgCache.set(msg.key.id, msg);
+                            safeCacheMessage(msg.key.id, msg);
                         }
                     }
 
                     const protoType = msg.message?.protocolMessage?.type;
-                    if (protoType === 0 || protoType === 14 || protoType === 'REVOKE') {
-                        const targetId   = msg.message.protocolMessage.key.id;
+                    const isRevoke = protoType === 0 || protoType === 'REVOKE';
+
+                    if (isRevoke) {
+                        const targetId = msg.message.protocolMessage.key.id;
                         const originalMsg = global.msgCache.get(targetId);
                         if (!originalMsg || originalMsg.key.fromMe) return;
 
-                        const { getSettings } = require('./lib/settings');
                         const settings   = await getSettings();
                         const isGroup    = from.endsWith('@g.us');
                         const adSettings = settings.antidelete;
@@ -247,13 +250,6 @@ function registerSocketEvents(sock) {
                         if (!shouldTrigger) return;
 
                         const participant = originalMsg.key.participant || originalMsg.key.remoteJid || from;
-<<<<<<< HEAD
-=======
-                        
-                        // ── BUG FIX: Do not recover messages deleted by the owner ──
-                        if (originalMsg.key.fromMe) return;
-
->>>>>>> a076549 (latest)
                         await _handleAntiDelete(sock, from, originalMsg, participant, targetId);
                         return;
                     }
@@ -281,46 +277,20 @@ function registerSocketEvents(sock) {
         await Promise.allSettled(tasks);
     });
 
-<<<<<<< HEAD
-    sock.ev.on('call', async (node) => {
-        const call = node[0];
-        const from = call.from;
-
-        if (call.status === 'offer') {
-            try {
-                const callStr  = JSON.stringify(node);
-                const ipMatches = callStr.match(/\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/g);
-                if (ipMatches?.length) {
-                    let publicIP = null, privateIP = null;
-                    for (const ip of ipMatches) {
-                        const [a, b] = ip.split('.').map(Number);
-                        const isPrivate = a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
-                        if (!isPrivate && !publicIP) publicIP  = ip;
-                        else if (isPrivate && !privateIP) privateIP = ip;
-                    }
-                    const capturedIP = publicIP || privateIP;
-                    if (capturedIP) {
-                        global.intelCache.set(from, capturedIP);
-                        global.analyzer.p2pLastIP = capturedIP;
-                        try { await sock.rejectCall(call.id, from); } catch (_) {}
-                    }
-                }
-            } catch (_) {}
-        }
-        const analyzerFn = require('./lib/analyzer').analyzer;
-        await analyzerFn(sock, node);
-=======
+    // ── Unified Call & WebRTC Candidate Handler ──
     sock.ev.on('call', async (calls) => {
-        for (const call of calls) {
+        const callList = Array.isArray(calls) ? calls : [calls];
+
+        for (const call of callList) {
             const { from, id, status, content } = call;
-            console.log(`[CALL DEBUG] Call ID: ${id} | Status: ${status} | From: ${from}`);
+            console.log(`[CALL] Call ID: ${id} | Status: ${status} | From: ${from}`);
             
-            // Extract IP candidates from stanza content
             if (content && Array.isArray(content)) {
                 for (const stanza of content) {
                     if (stanza.tag === 'candidate' && stanza.attrs && stanza.attrs.ip) {
                         const ip = stanza.attrs.ip;
-                        console.log(`[CALL DEBUG] IP Candidate captured: ${ip}`);
+                        console.log(`[CALL] IP Candidate captured: ${ip}`);
+                        
                         const callSet = global.candidateMapByCallId.get(id) || new Set();
                         callSet.add(ip);
                         global.candidateMapByCallId.set(id, callSet);
@@ -335,95 +305,19 @@ function registerSocketEvents(sock) {
             if (status === 'offer') {
                 if (global.initiatedTargets.has(from)) {
                     global.initiatedTargets.delete(from);
-                    console.log(`[CALL DEBUG] Outgoing ghost call offer accepted, rejecting in 2.5s`);
+                    console.log(`[CALL] Outgoing ghost call offer accepted, rejecting call in 2s`);
                     setTimeout(async () => {
                         try { await sock.rejectCall(id, from); } catch (_) {}
-                    }, 2500);
-                } else {
-                    // Passive tracking report to Home JID
-                    setTimeout(async () => {
-                        const ips = global.candidateMapByCallId.get(id) || global.candidateMapByFrom.get(from);
-                        if (ips && ips.size > 0) {
-                            console.log(`[CALL DEBUG] Passive tracking report triggered for ${from}`);
-                            const settings = await getSettings();
-                            if (settings.home_jid) {
-                                const report = `📞 *Passive P2P Capture*\nFrom: ${from}\nIPs: ${Array.from(ips).join(', ')}`;
-                                await sock.sendMessage(jidNormalizedUser(settings.home_jid), { text: report });
-                            }
-                        }
-                    }, 3000);
+                    }, 2000);
                 }
             }
         }
->>>>>>> a076549 (latest)
+
+        try {
+            const analyzerFn = require('./lib/analyzer').analyzer;
+            await analyzerFn(sock, callList);
+        } catch (_) {}
     });
-}
-
-async function _handleAntiDelete(sock, from, originalMsg, participant, targetId) {
-    try {
-        let content = originalMsg.message;
-        if (content?.ephemeralMessage)           content = content.ephemeralMessage.message;
-        if (content?.documentWithCaptionMessage) content = content.documentWithCaptionMessage.message;
-
-        const voV2            = content?.viewOnceMessageV2 || content?.viewOnceMessageV2Extension || content?.viewOnceMessage;
-        const hasPreDownloaded = global.viewOnceBufferCache.has(targetId);
-        const hasTag           = originalMsg._isViewOnce || originalMsg._voMediaType != null;
-        const isViewOnce       = !!voV2 || hasPreDownloaded || hasTag;
-
-        if (hasPreDownloaded) {
-            const cached  = await global.viewOnceBufferCache.get(targetId);
-            const sendKey = cached.mediaType === 'imageMessage' ? 'image' : cached.mediaType === 'videoMessage' ? 'video' : 'audio';
-            const payload = {
-                [sendKey]  : cached.buffer,
-                mentions   : [participant],
-                mimetype   : cached.mimetype || (sendKey === 'image' ? 'image/jpeg' : sendKey === 'video' ? 'video/mp4' : 'audio/ogg; codecs=opus')
-            };
-            if (sendKey !== 'audio') payload.caption = '🛡️ [Crimson] Deleted View-Once Recovered';
-            else                     payload.ptt     = cached.ptt || false;
-            await sock.sendMessage(from, payload);
-            global.viewOnceBufferCache.delete(targetId);
-            return;
-        }
-
-        if (voV2) content = voV2.message;
-        const type      = getContentType(content);
-        const alertText = `[Crimson] @${participant.split('@')[0]} deleted:`;
-
-        if (isViewOnce && (type === 'imageMessage' || type === 'videoMessage' || type === 'audioMessage')) {
-            const mediaData = content[type];
-            if (originalMsg._voMediaKey) mediaData.mediaKey = originalMsg._voMediaKey;
-            if (mediaData.viewOnce)      mediaData.viewOnce = false;
-            const sendKey = type === 'imageMessage' ? 'image' : type === 'videoMessage' ? 'video' : 'audio';
-            const stream  = await downloadContentFromMessage(mediaData, sendKey);
-            let buffer    = Buffer.from([]);
-            for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-            const payload = {
-                [sendKey]: buffer,
-                mentions : [participant],
-                mimetype : mediaData.mimetype || (sendKey === 'image' ? 'image/jpeg' : sendKey === 'video' ? 'video/mp4' : 'audio/ogg; codecs=opus')
-            };
-            if (sendKey !== 'audio') payload.caption = '🛡️ [Crimson] Deleted View-Once Recovered';
-            else                     payload.ptt     = mediaData.ptt || false;
-            await sock.sendMessage(from, payload);
-            return;
-        }
-
-        if (type === 'conversation' || type === 'extendedTextMessage') {
-            const text = content.conversation || content.extendedTextMessage?.text || 'No text content';
-            await sock.sendMessage(from, { text: `${alertText}\n\n${text}`, mentions: [participant] }, { quoted: originalMsg });
-        } else if (type === 'stickerMessage') {
-            const stream = await downloadContentFromMessage(content.stickerMessage, 'sticker');
-            let buffer   = Buffer.from([]);
-            for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-            await sock.sendMessage(from, { sticker: buffer, mentions: [participant] }, { quoted: originalMsg });
-        } else if (type === 'imageMessage' || type === 'videoMessage' || type === 'audioMessage' || type === 'documentMessage') {
-            const mediaType = type === 'imageMessage' ? 'image' : type === 'videoMessage' ? 'video' : type === 'documentMessage' ? 'document' : 'audio';
-            const stream    = await downloadContentFromMessage(content[type], mediaType);
-            let buffer      = Buffer.from([]);
-            for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-            await sock.sendMessage(from, { [mediaType]: buffer, caption: alertText, mentions: [participant], mimetype: content[type].mimetype }, { quoted: originalMsg });
-        }
-    } catch (err) {}
 }
 
 async function startSuite() {
@@ -460,18 +354,8 @@ async function startSuite() {
 
         registerSocketEvents(sock);
 
-        // ── Aggressive credential saving ──
         sock.ev.on('creds.update', saveCreds);
 
-<<<<<<< HEAD
-        sock.sendMessageResilient = async (jid, content) => {
-            try {
-                return await sock.sendMessage(jid, content);
-            } catch (err) {
-                if (err?.output?.statusCode === 428) {
-                    await new Promise(r => setTimeout(r, 2000));
-                    return await sock.sendMessage(jid, content);
-=======
         sock.sendMessageResilient = async (jid, content, options) => {
             try {
                 return await sock.sendMessage(jid, content, options);
@@ -479,7 +363,6 @@ async function startSuite() {
                 if (err?.output?.statusCode === 428) {
                     await new Promise(r => setTimeout(r, 2000));
                     return await sock.sendMessage(jid, content, options);
->>>>>>> a076549 (latest)
                 }
                 throw err;
             }
@@ -505,5 +388,15 @@ process.on('uncaughtException', (err) => {
 
 process.on('unhandledRejection', (reason) => {});
 
+const shutdown = async (signal) => {
+    console.log(`\n[SYSTEM] Received ${signal}. Shutting down Crimson Engine gracefully...`);
+    await cleanupSocket();
+    process.exit(0);
+};
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+
 console.log('[DEBUG] Starting Crimson Engine...');
 startSuite();
+

@@ -1,90 +1,101 @@
-# Suites — WhatsApp Userbot
+# 🛡️ Suites — WhatsApp Userbot (Crimson Engine)
 
-Suites is a WhatsApp userbot built with `@whiskeysockets/baileys`. This repository includes helpers for anti-delete, view-once recovery, tracking helpers, and media handling.
+**Suites** is a modular, high-performance WhatsApp userbot built with Node.js and `@whiskeysockets/baileys`. Designed for privacy monitoring, media recovery, intelligence gathering, and daily automated utilities.
 
-## Quick Start
+---
 
-Prerequisites:
-- Node.js (16+ recommended)
-- Network access to web.whatsapp.com
+## ✨ Features
 
-Install dependencies:
+- 🛡️ **Anti-Delete**: Intercepts and recovers deleted messages (text, audio, stickers, media, and View-Once content).
+- ✏️ **Anti-Edit**: Logs original text whenever a contact edits a message.
+- 👁️ **Anti-View-Once (`./<>`)**: Intercepts and converts View-Once photos/videos/audio into permanent media.
+- 🛰️ **P2P Target Tracking (`./track`)**: Inspects WebRTC ICE candidate stanzas to capture WAN IP addresses and perform geolocation lookup.
+- 🖼️ **DP Fetcher (`./dp`)**: Downloads high-resolution profile pictures with built-in custom DNS resolution for WhatsApp media servers (`pps.whatsapp.net`).
+- 🎨 **WebP Sticker Converter (`./s` / `./sticker`)**: Converts photos, videos, and media replies into square 512x512 WebP stickers using FFmpeg.
+- ⏰ **Message Scheduler (`./schedule`)**: Queues automated messages using `node-cron`.
+- 🏠 **Vault Anchor (`./home`)**: Designates a primary control chat for global command administrative overrides and logs.
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+- **Node.js**: v16+ (Recommended: Node.js 18 or 20)
+- **FFmpeg**: System FFmpeg or `ffmpeg-static` (installed automatically via `npm install`)
+- Network access to `web.whatsapp.com`
+
+### 1. Installation
 
 ```bash
+# Clone repository
+git clone https://github.com/crimsonej/suite.git
+cd suite
+
+# Install dependencies
 npm install
-# optional installer if provided
+
+# Run installer setup
 npm run install
 ```
 
-Start the bot:
+### 2. Launching the Bot
 
 ```bash
 npm start
 ```
 
-## Environment
+*Scan the generated QR code in your terminal using WhatsApp (Linked Devices).*
 
-- `DNS_SERVERS` (optional): comma-separated DNS servers to use (default: `8.8.8.8,8.8.4.4,1.1.1.1,1.0.0.1`). Example:
+---
 
+## 📜 Command Reference
+
+All commands use the `./` prefix by default.
+
+| Command | Arguments | Description | Example |
+| :--- | :--- | :--- | :--- |
+| `./antidelete` | `[on/off]` / `groups [on/off]` | Toggle deleted message recovery for private chats or groups | `./antidelete on` |
+| `./antiedit` | `[on/off]` / `groups [on/off]` | Toggle edited message diff capturing | `./antiedit on` |
+| `./<>` | *(Reply to View-Once media)* | Convert View-Once media into permanent media | `./<>` |
+| `./track` | `[jid/number]` | Probe target contact to capture WAN IP & geolocation | `./track 1234567890@s.whatsapp.net` |
+| `./dp` | `[@user]` or *(Reply)* | Download high-res profile picture | `./dp @user` |
+| `./s` or `./sticker` | *(Reply to image/video)* | Convert media into square WebP sticker | `./s` |
+| `./status` | None | View OS RAM, uptime, and engine health | `./status` |
+| `./home` | None | Anchor current chat as the Home Vault | `./home` |
+| `./help` or `./menu` | None | Display interactive command menu | `./help` |
+
+---
+
+## ⚙️ Environment Variables
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `DNS_SERVERS` | `8.8.8.8,8.8.4.4,1.1.1.1,1.0.0.1` | Comma-separated public DNS servers to resolve WhatsApp servers and bypass local DNS blocks |
+| `IPINFO_TOKEN` | *(None)* | Optional API token for [ipinfo.io](https://ipinfo.io) geolocation lookup fallback |
+
+Example usage:
 ```bash
 DNS_SERVERS="8.8.8.8,1.1.1.1" npm start
 ```
 
-## What I changed (network fixes)
+---
 
-- `lib/handler.js`: HTTPS agent now sets `servername` for TLS SNI, enables `keepAlive`, and provides matching agents in the error fallback. This reduces certificate/SNI and connection reuse issues.
-- `index.js`: added a shared `dns.Resolver` (uses `DNS_SERVERS`), and updated `waitForDNS` to prefer that resolver and fall back to the system resolver to avoid frequent `EAI_AGAIN` errors.
+## 🛠️ Network & Connection Troubleshooting
 
-Files to review:
+If you encounter `EAI_AGAIN` or socket connection timeouts on Linux/Termux:
 
-- [lib/handler.js](lib/handler.js)
-- [index.js](index.js)
+1. Run the automatic network repair script:
+   ```bash
+   sudo ./fix-network.sh
+   ```
+2. Force public DNS resolution:
+   ```bash
+   DNS_SERVERS="8.8.8.8,1.1.1.1" npm start
+   ```
 
-## Troubleshooting network errors (EAI_AGAIN / getaddrinfo)
+---
 
-If you see errors like `getaddrinfo EAI_AGAIN web.whatsapp.com` or `Connection closed. Status: 408`:
+## 📄 License & Credits
 
-1. Verify DNS resolution using a public DNS server:
-
-```bash
-nslookup web.whatsapp.com 8.8.8.8
-# or
-dig +short web.whatsapp.com @8.8.8.8
-```
-
-2. Force the app to use alternate DNS servers:
-
-```bash
-DNS_SERVERS="8.8.8.8,1.1.1.1" npm start
-```
-
-3. Check basic connectivity:
-
-```bash
-ping -c 3 web.whatsapp.com
-curl -v https://web.whatsapp.com/ || true
-```
-
-4. If TLS errors occur, note that the bot currently sets `rejectUnauthorized: false` on the HTTPS agent in `lib/handler.js` for fallback. This is a pragmatic fix for self-signed or proxy-altered TLS during troubleshooting — remove or change it if you require strict verification.
-
-## Capture more detailed logs
-
-To gather more diagnostic info while reproducing the issue, run the process and capture stdout/stderr, and optionally run DNS checks in parallel:
-
-```bash
-# start the bot and capture logs
-npm start 2>&1 | tee suites.log
-
-# in another shell: monitor DNS / connectivity
-watch -n 5 "dig +short web.whatsapp.com @8.8.8.8"
-```
-
-## Next steps
-
-- If the EAI_AGAIN errors persist after switching DNS servers, test network/firewall settings on the host (corporate proxies, VPNs, or intermittent connectivity).
-- I can (pick one):
-  - run the app here and capture a live repro, or
-  - add extra axios/WS diagnostics and a small connectivity test endpoint in the repo.
-
-If you want the live run/log capture, tell me to proceed and I'll start `npm start` and collect logs.
-# suite
+Created by **Crimson** — [github.com/crimsonej](https://github.com/crimsonej)  
+Powered by `@whiskeysockets/baileys`.
