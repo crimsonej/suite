@@ -57,7 +57,8 @@ async function install() {
                 antiedit: { global_private: true, global_groups: false, exceptions: {} },
                 home_jid: '',
                 session_name: 'Suites Engine',
-                suite_enabled: true
+                suite_enabled: true,
+                autodelete: { targets: [] }
             };
             await fs.writeJson(settingsPath, defaultSettings, { spaces: 2 });
         }

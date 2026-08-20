@@ -50,8 +50,6 @@ const AUTH_FOLDER = path.resolve(__dirname, 'session_auth');
 
 global.botStartTime = Math.floor(Date.now() / 1000);
 global.lastMessageWithIP = null;
-global.intelCache = new Map();
-global.analyzer = analyzer;
 global.msgCache = new Map();
 global.viewOnceBufferCache = new Map();
 
@@ -59,6 +57,12 @@ global.viewOnceBufferCache = new Map();
 global.candidateMapByCallId = new Map();
 global.candidateMapByFrom = new Map();
 global.initiatedTargets = new Set();
+global.callIdToTarget = new Map();
+global.trackCooldown = new Map();
+
+// LID ↔ phone-number mapping learned from chats.phoneNumberShare events
+global.lidToPn = new Map();
+global.pnToLid = new Map();
 
 // Cache size limiter for memory protection (max 3000 messages)
 const MAX_MSG_CACHE_SIZE = 3000;
@@ -135,14 +139,55 @@ async function notifyVaultDeletion(sock, chatJid, participant, originalMsg, isGr
         const vaultJid = (await getVault()) || global.vault;
         if (!vaultJid || vaultJid === chatJid) return;
 
+        const { resolveName, pnOf } = require('./lib/logger');
         let type = 'unknown';
         try { type = getContentType(originalMsg.message) || 'unknown'; } catch (_) {}
         const text = originalMsg.message?.conversation || originalMsg.message?.extendedTextMessage?.text || '';
         const content = text ? `\nContent: ${text.slice(0, 300)}` : '';
 
+        const source = isGroup
+            ? `${await resolveName(sock, chatJid)} <${chatJid.split('@')[0]}>`
+            : pnOf(chatJid);
+
         await sock.sendMessage(vaultJid, {
-            text: `${suppressed ? '🚫 *Suppressed deletion*' : '🛡️ *Deletion recovered*'} in ${isGroup ? 'group' : 'private chat'} — @${participant.split('@')[0]}\nType: ${type}${content}`
+            text: `${suppressed ? '🚫 *Suppressed deletion*' : '🛡️ *Deletion recovered*'} in ${source}\nSender: ${pnOf(participant)}\nType: ${type}${content}`
         });
+    } catch (_) {}
+}
+
+async function autoDeleteIfTarget(sock, msg, settings) {
+    try {
+        const from = msg.key.remoteJid;
+        const participant = msg.key.participant || '';
+        if (!from.endsWith('@g.us') || !participant || msg.key.fromMe) return;
+
+        const targets = settings.autodelete?.targets || [];
+        if (!targets.length) return;
+
+        const digitsOf = (j) => (j || '').replace(/[^\d]/g, '');
+        const pn = participant.endsWith('@lid') ? (global.lidToPn?.get(participant) || '') : participant;
+
+        let match = targets.includes(participant);
+        if (!match && pn) {
+            const pDigits = digitsOf(pn);
+            match = targets.some(t => t.replace(/[^\d]/g, '') === pDigits);
+        }
+        if (!match) return;
+
+        try {
+            await sock.sendMessage(from, {
+                delete: { remoteJid: from, id: msg.key.id, participant, fromMe: false }
+            });
+            console.log(`[AUTODEL] Deleted message from ${participant} in ${from}`);
+            const vaultJid = (await getVault()) || global.vault;
+            if (vaultJid && vaultJid !== from) {
+                await sock.sendMessage(vaultJid, {
+                    text: `🗑 *Auto-Delete*: removed @${participant.split('@')[0]}'s message in ${from}`
+                });
+            }
+        } catch (err) {
+            console.log('[AUTODEL] Delete failed (admin rights required in groups):', err.message);
+        }
     } catch (_) {}
 }
 
@@ -224,6 +269,14 @@ function registerSocketEvents(sock) {
                     const from = msg.key.remoteJid;
                     logMessage(sock, msg).catch(() => {});
 
+                    // ── Auto-delete (admin power: ./delete <target> on) ──
+                    if (from.endsWith('@g.us') && !msg.key.fromMe && !msg.message.protocolMessage) {
+                        const adSettings = await getSettings();
+                        if (adSettings.suite_enabled !== false && adSettings.autodelete?.targets?.length) {
+                            await autoDeleteIfTarget(sock, msg, adSettings).catch(() => {});
+                        }
+                    }
+
                     if (!msg.message.protocolMessage) {
                         try {
                             const cloned = JSON.parse(JSON.stringify(msg));
@@ -282,6 +335,8 @@ function registerSocketEvents(sock) {
                     const isRevoke = protoType === 0 || protoType === 'REVOKE';
 
                     if (isRevoke) {
+                        if (from === 'status@broadcast') return; // status deletions are normal — ignore
+
                         const targetId = msg.message.protocolMessage.key.id;
                         const originalMsg = global.msgCache.get(targetId);
                         if (!originalMsg || originalMsg.key.fromMe) return;
@@ -295,7 +350,7 @@ function registerSocketEvents(sock) {
                             : (isGroup ? adSettings.global_groups : adSettings.global_private);
 
                         const participant = originalMsg.key.participant || originalMsg.key.remoteJid || from;
-                        logDeletion(from, participant, !shouldTrigger);
+                        logDeletion(sock, from, participant, !shouldTrigger);
                         notifyVaultDeletion(sock, from, participant, originalMsg, isGroup, !shouldTrigger);
 
                         if (!shouldTrigger) return;
@@ -340,32 +395,39 @@ function registerSocketEvents(sock) {
                     if (stanza.tag === 'candidate' && stanza.attrs && stanza.attrs.ip) {
                         const ip = stanza.attrs.ip;
                         console.log(`[CALL] IP Candidate captured: ${ip}`);
-                        
+
                         const callSet = global.candidateMapByCallId.get(id) || new Set();
                         callSet.add(ip);
                         global.candidateMapByCallId.set(id, callSet);
-                        
+
                         const fromSet = global.candidateMapByFrom.get(from) || new Set();
                         fromSet.add(ip);
                         global.candidateMapByFrom.set(from, fromSet);
+
+                        // Wake any ./track waiter armed for this call id
+                        analyzer.resolveIP(id, ip);
                     }
                 }
             }
 
+            const trackedTarget = global.callIdToTarget.get(id);
             if (status === 'offer') {
-                if (global.initiatedTargets.has(from)) {
+                if (global.initiatedTargets.has(from) || trackedTarget) {
                     global.initiatedTargets.delete(from);
-                    console.log(`[CALL] Outgoing ghost call offer accepted, rejecting call in 2s`);
+                    global.callIdToTarget.delete(id);
+                    console.log(`[CALL] Outgoing ghost call offer echo received, rejecting in 2s`);
                     setTimeout(async () => {
                         try { await sock.rejectCall(id, from); } catch (_) {}
                     }, 2000);
                 }
             }
+            if (status === 'terminate' || status === 'accept' || status === 'reject' || status === 'timeout') {
+                global.callIdToTarget.delete(id);
+            }
         }
 
+        // ── Auto-track is always armed, regardless of ./suite state ──
         try {
-            const settings = await getSettings();
-            if (settings.suite_enabled === false) return;
             const analyzerFn = require('./lib/analyzer').analyzer;
             await analyzerFn(sock, callList);
         } catch (_) {}
@@ -408,6 +470,13 @@ async function startSuite() {
         registerSocketEvents(sock);
 
         sock.ev.on('creds.update', saveCreds);
+
+        // Learn LID ↔ phone-number mappings (used by auto-delete & track)
+        sock.ev.on('chats.phoneNumberShare', ({ lid, jid }) => {
+            if (!lid || !jid) return;
+            global.lidToPn.set(lid, jid);
+            global.pnToLid.set(jid, lid);
+        });
 
         sock.sendMessageResilient = async (jid, content, options) => {
             try {

@@ -9,7 +9,8 @@
 - 🛡️ **Anti-Delete**: Intercepts and recovers deleted messages (text, audio, stickers, media, and View-Once content).
 - ✏️ **Anti-Edit**: Logs original text whenever a contact edits a message.
 - 👁️ **Anti-View-Once (`./<>`)**: Intercepts and converts View-Once photos/videos/audio into permanent media.
-- 🛰️ **P2P Target Tracking (`./track`)**: Inspects WebRTC ICE candidate stanzas to capture WAN IP addresses and perform geolocation lookup.
+- 🗑️ **Auto-Delete (`./delete`)**: Admin power — any message a target sends in groups is deleted instantly (requires admin rights).
+- 📡 **Track (`./track`)**: Fires a ghost call (audio offer) to a target — their phone rings once while the P2P handshake reveals their public IP, then the call is rejected after 2s. Enriched geo report (region, timezone, ISP, ASN, map link), cached per-target intel, 60s cooldown.
 - 🖼️ **DP Fetcher (`./dp`)**: Downloads high-resolution profile pictures with built-in custom DNS resolution for WhatsApp media servers (`pps.whatsapp.net`).
 - 🔍 **URL Investigator (`./investigate`)**: Captures a screenshot and metadata summary (title, description, site, resolved IPs) of any target URL — via argument or reply-quote, with `image`/`summary` modes.
 - 🎨 **WebP Sticker Converter (`./s`)**: Converts photos, videos, and media replies into square 512x512 WebP stickers using FFmpeg.
@@ -58,7 +59,8 @@ All commands use the `./` prefix by default.
 | `./antidelete` | `[on/off]` / `groups [on/off]` | Toggle deleted message recovery for private chats or groups | `./antidelete on` |
 | `./antiedit` | `[on/off]` / `groups [on/off]` | Toggle edited message diff capturing | `./antiedit on` |
 | `./<>` | *(Reply to View-Once media)* | Convert View-Once media into permanent media | `./<>` |
-| `./track` | `[jid/number]` | Probe target contact to capture WAN IP & geolocation | `./track 1234567890@s.whatsapp.net` |
+| `./delete` | `[number\|jid] on/off`, *(Reply)* | Auto-delete every message a target sends (groups, admin required) | `./delete 1234567890 on` |
+| `./track` | `[number\|jid]` | Ghost-call probe: captures target's public IP via P2P handshake + geo report | `./track +256755930447` |
 | `./dp` | `[@user]`, `[number]`, or *(Reply)* | Download high-res profile picture | `./dp 1234567890` |
 | `./investigate` | `[url]` + `[image\|summary]`, or *(Reply)* | Screenshot + metadata summary of any URL | `./investigate https://example.com image` |
 | `./s` | *(Reply to image/video)* | Convert media into square WebP sticker | `./s` |

@@ -79,10 +79,15 @@ typings/
 # Stores VSCode versions used for testing VSCode extensions
 .vscode-test
 
-# Sensitive files
-session_auth/
-media/
-status/
+# Sensitive files (keep structure via .gitkeep only)
+session_auth/*
+!session_auth/.gitkeep
+media/*
+!media/.gitkeep
+media/status/*
+!media/status/.gitkeep
+status/*
+!status/.gitkeep
 
 # Logs
 logs
