@@ -11,8 +11,9 @@
 - 👁️ **Anti-View-Once (`./<>`)**: Intercepts and converts View-Once photos/videos/audio into permanent media.
 - 🛰️ **P2P Target Tracking (`./track`)**: Inspects WebRTC ICE candidate stanzas to capture WAN IP addresses and perform geolocation lookup.
 - 🖼️ **DP Fetcher (`./dp`)**: Downloads high-resolution profile pictures with built-in custom DNS resolution for WhatsApp media servers (`pps.whatsapp.net`).
-- 🎨 **WebP Sticker Converter (`./s` / `./sticker`)**: Converts photos, videos, and media replies into square 512x512 WebP stickers using FFmpeg.
-- ⏰ **Message Scheduler (`./schedule`)**: Queues automated messages using `node-cron`.
+- 🔍 **URL Investigator (`./investigate`)**: Captures a screenshot and metadata summary (title, description, site, resolved IPs) of any target URL — via argument or reply-quote, with `image`/`summary` modes.
+- 🎨 **WebP Sticker Converter (`./s`)**: Converts photos, videos, and media replies into square 512x512 WebP stickers using FFmpeg.
+- 🔌 **Master Switch (`./suite`)**: Pause or resume the entire engine instantly — persists across restarts.
 - 🏠 **Vault Anchor (`./home`)**: Designates a primary control chat for global command administrative overrides and logs.
 
 ---
@@ -58,9 +59,11 @@ All commands use the `./` prefix by default.
 | `./antiedit` | `[on/off]` / `groups [on/off]` | Toggle edited message diff capturing | `./antiedit on` |
 | `./<>` | *(Reply to View-Once media)* | Convert View-Once media into permanent media | `./<>` |
 | `./track` | `[jid/number]` | Probe target contact to capture WAN IP & geolocation | `./track 1234567890@s.whatsapp.net` |
-| `./dp` | `[@user]` or *(Reply)* | Download high-res profile picture | `./dp @user` |
-| `./s` or `./sticker` | *(Reply to image/video)* | Convert media into square WebP sticker | `./s` |
+| `./dp` | `[@user]`, `[number]`, or *(Reply)* | Download high-res profile picture | `./dp 1234567890` |
+| `./investigate` | `[url]` + `[image\|summary]`, or *(Reply)* | Screenshot + metadata summary of any URL | `./investigate https://example.com image` |
+| `./s` | *(Reply to image/video)* | Convert media into square WebP sticker | `./s` |
 | `./status` | None | View OS RAM, uptime, and engine health | `./status` |
+| `./suite` | `[on/off]` | Pause/resume the entire engine (persists across restarts) | `./suite off` |
 | `./home` | None | Anchor current chat as the Home Vault | `./home` |
 | `./help` or `./menu` | None | Display interactive command menu | `./help` |
 

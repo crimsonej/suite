@@ -56,15 +56,10 @@ async function install() {
                 antidelete: { global_private: true, global_groups: false, exceptions: {} },
                 antiedit: { global_private: true, global_groups: false, exceptions: {} },
                 home_jid: '',
-                session_name: 'Suites Engine'
+                session_name: 'Suites Engine',
+                suite_enabled: true
             };
             await fs.writeJson(settingsPath, defaultSettings, { spaces: 2 });
-        }
-
-        // Initialize default schedules JSON if missing
-        const schedulesPath = path.join(__dirname, 'media/schedules.json');
-        if (!await fs.pathExists(schedulesPath)) {
-            await fs.writeJson(schedulesPath, []);
         }
 
         console.log(chalk.green('✔ Environment & media structure initialized successfully!'));

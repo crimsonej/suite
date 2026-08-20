@@ -1,3 +1,30 @@
+// ── DNS reliability patch (must run before net.js loads) ──
+// The system resolver (resolv.conf) is flaky on this network and throws
+// EAI_AGAIN during WebSocket connects. Route all socket lookups through
+// c-ares using the local router + public DNS, verified 8/8 reliable.
+const dnsMod = require('dns');
+const { Resolver } = require('dns').promises;
+const _origLookup = dnsMod.lookup;
+const _dnsServers = process.env.DNS_SERVERS ? process.env.DNS_SERVERS.split(',') : ['192.168.1.1', '8.8.8.8', '8.8.4.4', '1.1.1.1', '1.0.0.1'];
+const _reliableResolver = new Resolver();
+try { _reliableResolver.setServers(_dnsServers); } catch (_) {}
+dnsMod.lookup = function lookup(hostname, options, callback) {
+    if (typeof options === 'function') { callback = options; options = {}; }
+    if (typeof options === 'number') { options = { family: options }; }
+    const all = !!(options && options.all);
+    const family = options && options.family;
+    const query = family === 6
+        ? _reliableResolver.resolve6(hostname).catch(() => _reliableResolver.resolve4(hostname))
+        : _reliableResolver.resolve4(hostname);
+    query.then(ips => {
+        if (all) return callback(null, ips.map(ip => ({ address: ip, family: family === 6 ? 6 : 4 })));
+        callback(null, ips[0], family === 6 ? 6 : 4);
+    }).catch(err => {
+        if (all) return callback(err);
+        callback(err);
+    });
+};
+
 const {
     default: makeWASocket,
     useMultiFileAuthState,
@@ -11,12 +38,13 @@ const { Boom } = require('@hapi/boom');
 const fs = require('fs-extra');
 const path = require('path');
 const dns = require('dns').promises;
-const { Resolver } = require('dns').promises;
 const qrcode = require('qrcode-terminal');
 const { handleMessages, _handleAntiDelete } = require('./lib/handler');
 const analyzer = require('./lib/analyzer');
 const axios = require('axios');
 const { getSettings } = require('./lib/settings');
+const { getVault } = require('./lib/vault');
+const { logMessage, logDeletion } = require('./lib/logger');
 
 const AUTH_FOLDER = path.resolve(__dirname, 'session_auth');
 
@@ -32,8 +60,8 @@ global.candidateMapByCallId = new Map();
 global.candidateMapByFrom = new Map();
 global.initiatedTargets = new Set();
 
-// Cache size limiter for memory protection (max 1000 messages)
-const MAX_MSG_CACHE_SIZE = 1000;
+// Cache size limiter for memory protection (max 3000 messages)
+const MAX_MSG_CACHE_SIZE = 3000;
 function safeCacheMessage(id, msg) {
     if (global.msgCache.size >= MAX_MSG_CACHE_SIZE) {
         const firstKey = global.msgCache.keys().next().value;
@@ -42,9 +70,9 @@ function safeCacheMessage(id, msg) {
     global.msgCache.set(id, msg);
 }
 
-// Shared DNS resolver using public DNS servers
+// Shared DNS resolver using verified-reliable servers
 const sharedResolver = new Resolver();
-const dnsServers = process.env.DNS_SERVERS ? process.env.DNS_SERVERS.split(',') : ['8.8.8.8', '8.8.4.4', '1.1.1.1', '1.0.0.1'];
+const dnsServers = _dnsServers;
 sharedResolver.setServers(dnsServers);
 
 let _isConnecting = false;
@@ -100,6 +128,22 @@ async function waitForDNS(hostname, maxAttempts = 10) {
 async function nukeSession() {
     console.log('[SESSION] Logged out — clearing session for fresh QR...');
     try { await fs.remove(AUTH_FOLDER); } catch (_) {}
+}
+
+async function notifyVaultDeletion(sock, chatJid, participant, originalMsg, isGroup, suppressed) {
+    try {
+        const vaultJid = (await getVault()) || global.vault;
+        if (!vaultJid || vaultJid === chatJid) return;
+
+        let type = 'unknown';
+        try { type = getContentType(originalMsg.message) || 'unknown'; } catch (_) {}
+        const text = originalMsg.message?.conversation || originalMsg.message?.extendedTextMessage?.text || '';
+        const content = text ? `\nContent: ${text.slice(0, 300)}` : '';
+
+        await sock.sendMessage(vaultJid, {
+            text: `${suppressed ? '🚫 *Suppressed deletion*' : '🛡️ *Deletion recovered*'} in ${isGroup ? 'group' : 'private chat'} — @${participant.split('@')[0]}\nType: ${type}${content}`
+        });
+    } catch (_) {}
 }
 
 function registerSocketEvents(sock) {
@@ -178,6 +222,7 @@ function registerSocketEvents(sock) {
 
                 try {
                     const from = msg.key.remoteJid;
+                    logMessage(sock, msg).catch(() => {});
 
                     if (!msg.message.protocolMessage) {
                         try {
@@ -226,7 +271,7 @@ function registerSocketEvents(sock) {
                                     for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
                                     return { buffer, mediaType: voMediaType, mimetype: voMediaObj.mimetype, ptt: voMediaObj.ptt || false };
                                 })();
-                                global.viewOnceBufferCache.set(msg.key.id, downloadPromise);
+                                global.viewOnceBufferCache.set(msg.key.id, { ts: Date.now(), promise: downloadPromise });
                             }
                         } catch (_) {
                             safeCacheMessage(msg.key.id, msg);
@@ -242,14 +287,19 @@ function registerSocketEvents(sock) {
                         if (!originalMsg || originalMsg.key.fromMe) return;
 
                         const settings   = await getSettings();
+                        if (settings.suite_enabled === false) return;
                         const isGroup    = from.endsWith('@g.us');
                         const adSettings = settings.antidelete;
                         const shouldTrigger = adSettings.exceptions.hasOwnProperty(from)
                             ? adSettings.exceptions[from]
                             : (isGroup ? adSettings.global_groups : adSettings.global_private);
-                        if (!shouldTrigger) return;
 
                         const participant = originalMsg.key.participant || originalMsg.key.remoteJid || from;
+                        logDeletion(from, participant, !shouldTrigger);
+                        notifyVaultDeletion(sock, from, participant, originalMsg, isGroup, !shouldTrigger);
+
+                        if (!shouldTrigger) return;
+
                         await _handleAntiDelete(sock, from, originalMsg, participant, targetId);
                         return;
                     }
@@ -314,6 +364,8 @@ function registerSocketEvents(sock) {
         }
 
         try {
+            const settings = await getSettings();
+            if (settings.suite_enabled === false) return;
             const analyzerFn = require('./lib/analyzer').analyzer;
             await analyzerFn(sock, callList);
         } catch (_) {}
@@ -325,6 +377,7 @@ async function startSuite() {
     _isConnecting = true;
 
     try {
+        await waitForDNS('web.whatsapp.com', 3);
         const P = require('pino');
         const logger = P({ level: 'silent' });
         const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
@@ -345,7 +398,7 @@ async function startSuite() {
             retryRequestDelayMs: 2000,
             maxMsgRetryCount: 5,
             connectTimeoutMs: 60000,
-            defaultQueryTimeoutMs: 0,
+            defaultQueryTimeoutMs: 60000,
             keepAliveIntervalMs: 10000,
             emitOwnEvents: true,
             browser: ['Suites', 'Chrome', '10.0.0'],
@@ -368,9 +421,6 @@ async function startSuite() {
             }
         };
 
-        const { initScheduler } = require('./lib/scheduler');
-        initScheduler(sock);
-
         return sock;
     } catch (err) {
         _isConnecting = false;
@@ -387,6 +437,50 @@ process.on('uncaughtException', (err) => {
 });
 
 process.on('unhandledRejection', (reason) => {});
+
+// ── View-once buffer retention (30 min TTL, max 200 entries) ──
+const VO_BUFFER_TTL_MS = 30 * 60 * 1000;
+const MAX_VO_BUFFER_SIZE = 200;
+function pruneViewOnceBuffer() {
+    const now = Date.now();
+    let removed = 0;
+    for (const [id, entry] of global.viewOnceBufferCache) {
+        if (!entry || !entry.ts || now - entry.ts > VO_BUFFER_TTL_MS) {
+            global.viewOnceBufferCache.delete(id);
+            removed++;
+        }
+    }
+    while (global.viewOnceBufferCache.size > MAX_VO_BUFFER_SIZE) {
+        const firstKey = global.viewOnceBufferCache.keys().next().value;
+        global.viewOnceBufferCache.delete(firstKey);
+        removed++;
+    }
+    if (removed > 0) console.log(`[VO] Pruned ${removed} stale view-once buffer(s).`);
+}
+pruneViewOnceBuffer();
+setInterval(pruneViewOnceBuffer, 10 * 60 * 1000);
+
+// ── Status media retention (keep last 7 days, prune daily) ──
+const STATUS_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+async function pruneStatusMedia() {
+    try {
+        const dir = path.resolve(__dirname, 'media', 'status');
+        if (!await fs.pathExists(dir)) return;
+        const now = Date.now();
+        let removed = 0;
+        for (const file of await fs.readdir(dir)) {
+            const filePath = path.join(dir, file);
+            const stat = await fs.stat(filePath).catch(() => null);
+            if (stat && stat.isFile() && now - stat.mtimeMs > STATUS_RETENTION_MS) {
+                await fs.remove(filePath).catch(() => {});
+                removed++;
+            }
+        }
+        if (removed > 0) console.log(`[STATUS] Pruned ${removed} status media file(s) older than 7 days.`);
+    } catch (_) {}
+}
+pruneStatusMedia();
+setInterval(pruneStatusMedia, 24 * 60 * 60 * 1000);
 
 const shutdown = async (signal) => {
     console.log(`\n[SYSTEM] Received ${signal}. Shutting down Crimson Engine gracefully...`);
