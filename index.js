@@ -186,6 +186,27 @@ async function autoDeleteIfTarget(sock, msg, settings) {
             const pDigits = digitsOf(pn);
             match = groupTargets.some(entry => digitsOf(entry.targetJid) === pDigits);
         }
+
+        // Group messages may use a LID even when ./delete was configured
+        // with the member's phone JID. Resolve the member from group metadata
+        // so auto-delete does not depend on a prior phoneNumberShare event.
+        if (!match) {
+            try {
+                const metadata = await sock.groupMetadata(from);
+                const member = (metadata?.participants || []).find((entry) => (
+                    entry?.id === participant ||
+                    entry?.jid === participant ||
+                    entry?.lid === participant
+                ));
+                const memberJids = [member?.id, member?.jid, member?.lid].filter(Boolean);
+                match = groupTargets.some((target) => memberJids.some((memberJid) => (
+                    target.targetJid === memberJid ||
+                    digitsOf(target.targetJid) === digitsOf(memberJid)
+                )));
+            } catch (err) {
+                console.log(`[AUTODEL] Could not resolve group participant: ${err.message}`);
+            }
+        }
         if (!match) return;
 
         try {
@@ -202,7 +223,7 @@ async function autoDeleteIfTarget(sock, msg, settings) {
                 });
             }
         } catch (err) {
-            console.log('[AUTODEL] Delete failed (admin rights required in groups):', err.message);
+            console.log(`[AUTODEL] Delete failed for ${participant} in ${from} (admin rights required):`, err.message);
         }
     } catch (_) {}
 }
