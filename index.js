@@ -62,7 +62,7 @@ const analyzer = require('./lib/analyzer');
 const axios = require('axios');
 const { getSettings, saveSettings } = require('./lib/settings');
 const { getVault } = require('./lib/vault');
-const { logMessage } = require('./lib/logger');
+const { logMessage, resolveName, pnOf } = require('./lib/logger');
 
 const AUTH_FOLDER = path.resolve(__dirname, 'session_auth');
 
@@ -177,10 +177,14 @@ async function autoDeleteIfTarget(sock, msg, settings) {
         const digitsOf = (j) => (j || '').replace(/[^\d]/g, '');
         const pn = participant.endsWith('@lid') ? (global.lidToPn?.get(participant) || '') : participant;
 
-        let match = targets.includes(participant);
+        const groupTargets = targets.filter((entry) => (
+            entry && typeof entry === 'object' && entry.groupJid === from
+        ));
+
+        let match = groupTargets.some(entry => entry.targetJid === participant);
         if (!match && pn) {
             const pDigits = digitsOf(pn);
-            match = targets.some(t => t.replace(/[^\d]/g, '') === pDigits);
+            match = groupTargets.some(entry => digitsOf(entry.targetJid) === pDigits);
         }
         if (!match) return;
 
@@ -191,8 +195,10 @@ async function autoDeleteIfTarget(sock, msg, settings) {
             console.log(`[AUTODEL] Deleted message from ${participant} in ${from}`);
             const vaultJid = (await getVault()) || global.vault;
             if (vaultJid && vaultJid !== from) {
+                const senderName = await resolveName(sock, participant);
+                const senderPhone = pnOf(participant);
                 await sock.sendMessage(vaultJid, {
-                    text: `🗑 *Auto-Delete*: removed @${participant.split('@')[0]}'s message in ${from}`
+                    text: `🗑 *Auto-Delete*: removed ${senderName} (${senderPhone})'s message from this group.`
                 });
             }
         } catch (err) {
