@@ -192,11 +192,11 @@ async function autoDeleteIfTarget(sock, msg, settings) {
             await sock.sendMessage(from, {
                 delete: { remoteJid: from, id: msg.key.id, participant, fromMe: false }
             });
-            console.log(`[AUTODEL] Deleted message from ${participant} in ${from}`);
+            const senderName = await resolveName(sock, participant);
+            const senderPhone = pnOf(participant);
+            console.log(`[AUTODEL] Deleted message from ${senderName} (${senderPhone}) in ${from}`);
             const vaultJid = (await getVault()) || global.vault;
             if (vaultJid && vaultJid !== from) {
-                const senderName = await resolveName(sock, participant);
-                const senderPhone = pnOf(participant);
                 await sock.sendMessage(vaultJid, {
                     text: `🗑 *Auto-Delete*: removed ${senderName} (${senderPhone})'s message from this group.`
                 });
