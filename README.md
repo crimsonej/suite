@@ -64,6 +64,7 @@ All commands use the `./` prefix by default.
 | `./dp` | `[@user]`, `[number]`, or *(Reply)* | Download high-res profile picture | `./dp 1234567890` |
 | `./investigate` | `[url]` + `[image\|summary]`, or *(Reply)* | Screenshot + metadata summary of any URL | `./investigate https://example.com image` |
 | `./s` | *(Reply to image/video)* | Convert media into square WebP sticker | `./s` |
+| `./yt` | `audio\|video <url\|title>` | Download audio as voice note, or video up to 720p. Title mode shows a 5-option picker. | `./yt audio never gonna give you up` |
 | `./status` | None | View OS RAM, uptime, and engine health | `./status` |
 | `./suite` | `[on/off]` | Pause/resume the entire engine (persists across restarts) | `./suite off` |
 | `./home` | None | Anchor current chat as the Home Vault | `./home` |
